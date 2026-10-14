@@ -1,60 +1,133 @@
-import './style.css'
-import heroImg from './assets/hero.png'
-import typescriptLogo from './assets/typescript.svg'
-import viteLogo from './assets/vite.svg'
-import { setupCounter } from './counter.ts'
+import './style.css';
+import {
+  DEFAULT_VOLUME,
+  TRACKS,
+  clonePattern,
+  createDefaultPattern,
+  createEmptyPattern,
+  type Pattern,
+} from './state/pattern';
+import { generatePattern } from './state/dice';
+import { AudioEngine } from './audio/engine';
+import { Scheduler } from './audio/scheduler';
+import { createGrid } from './ui/grid';
+import { BPM_MAX, BPM_MIN, createControls } from './ui/controls';
 
-document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
-<section id="center">
-  <div class="hero">
-    <img src="${heroImg}" class="base" width="170" height="179">
-    <img src="${typescriptLogo}" class="framework" alt="TypeScript logo"/>
-    <img src="${viteLogo}" class="vite" alt="Vite logo" />
-  </div>
-  <div>
-    <h1>Get started</h1>
-    <p>Edit <code>src/main.ts</code> and save to test <code>HMR</code></p>
-  </div>
-  <button id="counter" type="button" class="counter"></button>
-</section>
+const state = {
+  pattern: createDefaultPattern(),
+  /** 주사위/지우기 직전 패턴 (되돌리기 1단계용) */
+  previous: null as Pattern | null,
+  bpm: 120,
+  playing: false,
+  volumes: TRACKS.map(() => DEFAULT_VOLUME),
+  muted: TRACKS.map(() => false),
+};
 
-<div class="ticks"></div>
+const app = document.querySelector<HTMLDivElement>('#app')!;
+app.innerHTML = `
+  <main class="machine">
+    <header class="machine__head">
+      <h1 class="title">Beat Sequencer</h1>
+      <p class="tagline">칸을 누르고, 주사위를 굴려서 나만의 비트를 만들어요.</p>
+    </header>
+    <div data-slot="controls"></div>
+    <div data-slot="grid"></div>
+    <footer class="files">
+      <button type="button" class="btn" disabled title="곧 추가돼요">저장</button>
+      <button type="button" class="btn" disabled title="곧 추가돼요">불러오기</button>
+      <button type="button" class="btn" disabled title="곧 추가돼요">WAV 내보내기</button>
+    </footer>
+  </main>
+`;
 
-<section id="next-steps">
-  <div id="docs">
-    <svg class="icon" role="presentation" aria-hidden="true"><use href="/icons.svg#documentation-icon"></use></svg>
-    <h2>Documentation</h2>
-    <p>Your questions, answered</p>
-    <ul>
-      <li>
-        <a href="https://vite.dev/" target="_blank">
-          <img class="logo" src="${viteLogo}" alt="" />
-          Explore Vite
-        </a>
-      </li>
-      <li>
-        <a href="https://www.typescriptlang.org" target="_blank">
-          <img class="button-icon" src="${typescriptLogo}" alt="">
-          Learn more
-        </a>
-      </li>
-    </ul>
-  </div>
-  <div id="social">
-    <svg class="icon" role="presentation" aria-hidden="true"><use href="/icons.svg#social-icon"></use></svg>
-    <h2>Connect with us</h2>
-    <p>Join the Vite community</p>
-    <ul>
-      <li><a href="https://github.com/vitejs/vite" target="_blank"><svg class="button-icon" role="presentation" aria-hidden="true"><use href="/icons.svg#github-icon"></use></svg>GitHub</a></li>
-      <li><a href="https://chat.vite.dev/" target="_blank"><svg class="button-icon" role="presentation" aria-hidden="true"><use href="/icons.svg#discord-icon"></use></svg>Discord</a></li>
-      <li><a href="https://x.com/vite_js" target="_blank"><svg class="button-icon" role="presentation" aria-hidden="true"><use href="/icons.svg#x-icon"></use></svg>X.com</a></li>
-      <li><a href="https://bsky.app/profile/vite.dev" target="_blank"><svg class="button-icon" role="presentation" aria-hidden="true"><use href="/icons.svg#bluesky-icon"></use></svg>Bluesky</a></li>
-    </ul>
-  </div>
-</section>
+// ---- 오디오 (첫 클릭 때 만든다: 브라우저가 사용자 동작 전에는 소리를 막는다) ----
+let audio: { engine: AudioEngine; scheduler: Scheduler } | null = null;
 
-<div class="ticks"></div>
-<section id="spacer"></section>
-`
+function ensureAudio() {
+  if (!audio) {
+    const engine = new AudioEngine(state.volumes, state.muted);
+    const scheduler = new Scheduler({
+      engine,
+      getPattern: () => state.pattern,
+      getBpm: () => state.bpm,
+      onStep: (step) => grid.setPlayhead(step),
+    });
+    audio = { engine, scheduler };
+  }
+  return audio;
+}
 
-setupCounter(document.querySelector<HTMLButtonElement>('#counter')!)
+async function togglePlay() {
+  if (state.playing) {
+    state.playing = false;
+    controls.setPlaying(false);
+    audio?.scheduler.stop();
+    grid.setPlayhead(null);
+    return;
+  }
+  const { engine, scheduler } = ensureAudio();
+  await engine.resume();
+  state.playing = true;
+  controls.setPlaying(true);
+  scheduler.start();
+}
+
+function setPattern(next: Pattern, { undoable }: { undoable: boolean }) {
+  if (undoable) state.previous = clonePattern(state.pattern);
+  state.pattern = next;
+  grid.render(state.pattern);
+  controls.setUndoEnabled(state.previous !== null);
+}
+
+const grid = createGrid({
+  onToggle(track, step) {
+    const on = !state.pattern[track][step];
+    state.pattern[track][step] = on;
+    grid.render(state.pattern);
+    // 재생 중이 아닐 때 칸을 켜면 그 소리를 미리 들려준다.
+    if (on && !state.playing) ensureAudio().engine.preview(track);
+  },
+  onVolume(track, value) {
+    state.volumes[track] = value;
+    audio?.engine.setVolume(track, value);
+  },
+  onMute(track, muted) {
+    state.muted[track] = muted;
+    audio?.engine.setMuted(track, muted);
+  },
+});
+
+const controls = createControls(
+  {
+    onPlayToggle: togglePlay,
+    onBpm(bpm) {
+      state.bpm = Math.min(BPM_MAX, Math.max(BPM_MIN, bpm));
+      controls.setBpm(state.bpm); // 스케줄러가 매 스텝마다 읽으므로 재생 중에도 바로 반영된다.
+    },
+    onDice() {
+      setPattern(generatePattern(), { undoable: true });
+    },
+    onUndo() {
+      if (!state.previous) return;
+      const restore = state.previous;
+      state.previous = null;
+      setPattern(restore, { undoable: false });
+    },
+    onClear() {
+      setPattern(createEmptyPattern(), { undoable: true });
+    },
+  },
+  state.bpm,
+);
+
+app.querySelector('[data-slot="controls"]')!.replaceWith(controls.el);
+app.querySelector('[data-slot="grid"]')!.replaceWith(grid.el);
+grid.render(state.pattern);
+
+// 스페이스바로 재생/정지 (버튼이나 슬라이더에 포커스가 있을 땐 기본 동작 유지)
+window.addEventListener('keydown', (e) => {
+  if (e.code !== 'Space') return;
+  if ((e.target as HTMLElement).closest('button, input')) return;
+  e.preventDefault();
+  void togglePlay();
+});
